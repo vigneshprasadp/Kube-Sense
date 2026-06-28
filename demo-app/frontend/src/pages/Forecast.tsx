@@ -1,8 +1,19 @@
 import { motion } from 'framer-motion';
-import { TrendingUp, ShieldAlert, CheckCircle, AlertTriangle, Clock } from 'lucide-react';
+import { TrendingUp, ShieldAlert, CheckCircle, AlertTriangle, TrendingDown, Minus } from 'lucide-react';
 import { Badge } from '../components/common/Badge';
 import { LineMetricChart } from '../components/charts/LineMetricChart';
 import type { Forecast } from '../types';
+
+/** Breach probability: 0–100% based on how full the buffer is and how fast trend is growing */
+function calcBreachProbability(fc: Forecast): number {
+  const pct = Math.min(100, Math.max(0, (fc.current_value / fc.threshold) * 100));
+  const slopeFactor = fc.minutes_to_breach !== null
+    ? Math.max(0, 1 - fc.minutes_to_breach / 120)   // 0 min → 100%, 120 min → 0%
+    : 0;
+  // Weighted: 60% utilization proximity, 40% time-to-breach urgency
+  const raw = (pct / 100) * 0.6 + slopeFactor * 0.4;
+  return Math.min(99, Math.round(raw * 100));
+}
 
 interface ForecastProps { forecasts: Forecast[]; }
 
@@ -73,24 +84,45 @@ export function ForecastPage({ forecasts }: ForecastProps) {
                 <Badge severity={fc.severity} size="sm" />
               </div>
 
-              {/* ETA */}
-              {fc.minutes_to_breach !== null ? (
-                <div className="flex items-center gap-3 p-4 bg-danger-50 border border-danger-100 rounded-2xl">
-                  <Clock className="h-8 w-8 text-danger-400 flex-shrink-0" />
-                  <div>
-                    <p className="text-3xl font-700 text-danger-600 tracking-tight leading-none">{fc.minutes_to_breach.toFixed(1)}</p>
-                    <p className="text-xs text-danger-500 font-500 mt-0.5">minutes until saturation threshold</p>
+              {/* Breach Probability */}
+              {(() => {
+                const prob = calcBreachProbability(fc);
+                const isRisky = prob >= 60;
+                const isMedium = prob >= 30 && prob < 60;
+                return (
+                  <div className={`p-4 rounded-2xl border ${
+                    isRisky  ? 'bg-danger-50 border-danger-100' :
+                    isMedium ? 'bg-warning-50 border-warning-100' :
+                               'bg-success-50 border-success-100'
+                  }`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className={`text-xs font-600 uppercase tracking-wider ${
+                        isRisky ? 'text-danger-500' : isMedium ? 'text-warning-600' : 'text-success-600'
+                      }`}>Breach Probability</p>
+                      <span className={`text-2xl font-800 tracking-tight ${
+                        isRisky ? 'text-danger-600' : isMedium ? 'text-warning-600' : 'text-success-600'
+                      }`}>{prob}%</span>
+                    </div>
+                    <div className="h-2 bg-white/60 rounded-full overflow-hidden">
+                      <motion.div
+                        className={`h-full rounded-full ${
+                          isRisky ? 'bg-danger-500' : isMedium ? 'bg-warning-500' : 'bg-success-500'
+                        }`}
+                        initial={{ width: 0 }}
+                        animate={{ width: `${prob}%` }}
+                        transition={{ duration: 0.9 }}
+                      />
+                    </div>
+                    <p className={`text-[10px] mt-1.5 font-500 ${
+                      isRisky ? 'text-danger-500' : isMedium ? 'text-warning-600' : 'text-success-600'
+                    }`}>
+                      {isRisky ? 'High risk — threshold breach imminent' :
+                       isMedium ? 'Moderate risk — monitor closely' :
+                       'Low risk — well within safe limits'}
+                    </p>
                   </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-3 p-4 bg-success-50 border border-success-100 rounded-2xl">
-                  <CheckCircle className="h-6 w-6 text-success-500" />
-                  <div>
-                    <p className="text-sm font-700 text-success-700">Stable</p>
-                    <p className="text-xs text-success-600 mt-0.5">No threshold breach predicted</p>
-                  </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Progress */}
               <div>
@@ -112,10 +144,21 @@ export function ForecastPage({ forecasts }: ForecastProps) {
               <LineMetricChart data={data} dataKey="current" predKey="predicted" threshold={fc.threshold} color="#14B8A6" predColor="#7C3AED" height={150} />
 
               {/* Stats */}
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-surface-100">
+              <div className="grid grid-cols-3 gap-3 pt-2 border-t border-surface-100">
                 <div>
-                  <p className="text-[10px] text-surface-400 font-500 uppercase tracking-wider">Slope / interval</p>
-                  <p className="text-sm font-700 text-surface-800">+{fc.trend_slope?.toFixed(5)}</p>
+                  <p className="text-[10px] text-surface-400 font-500 uppercase tracking-wider">Utilization</p>
+                  <p className="text-sm font-700 text-surface-800">{pct.toFixed(1)}%</p>
+                </div>
+                <div>
+                  <p className="text-[10px] text-surface-400 font-500 uppercase tracking-wider">Trend</p>
+                  <div className="flex items-center gap-1 mt-0.5">
+                    {(fc.trend_slope ?? 0) > 0.0001
+                      ? <TrendingUp className="h-3.5 w-3.5 text-danger-500" />
+                      : (fc.trend_slope ?? 0) < -0.0001
+                        ? <TrendingDown className="h-3.5 w-3.5 text-success-500" />
+                        : <Minus className="h-3.5 w-3.5 text-surface-400" />}
+                    <p className="text-sm font-700 text-surface-800">{(fc.trend_slope ?? 0) > 0 ? 'Rising' : (fc.trend_slope ?? 0) < 0 ? 'Falling' : 'Flat'}</p>
+                  </div>
                 </div>
                 <div>
                   <p className="text-[10px] text-surface-400 font-500 uppercase tracking-wider">R² Fit</p>

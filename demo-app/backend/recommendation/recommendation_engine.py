@@ -46,6 +46,21 @@ def get_rule_based_fallback(root_cause: str, affected_services: str):
             "Establish Horizontal Pod Autoscaler (HPA) using CPU target metrics.",
             "Define explicit container resource requests and limits in deployment manifests."
         ]
+    elif "crash" in root_cause_lower or "unavailable" in root_cause_lower or "terminated" in root_cause_lower:
+        explanation = (
+            f"The incident is caused by pod termination or crash failure of the target microservice. "
+            f"Since the containers are down or unreachable, the system is unable to process incoming requests, "
+            f"leading to cascading connection failures and service downtime across {affected_services}."
+        )
+        recommended_fixes = [
+            "Inspect container restart events and check logs for exit code errors (e.g. OOMKilled/Exit Code 137).",
+            "Verify pod state and replication status using 'kubectl describe pod'.",
+            "Check node resource pressure to ensure the host machine has enough capacity."
+        ]
+        preventive_measures = [
+            "Configure liveness and readiness probe delays to prevent premature container restarts.",
+            "Implement high-availability redundancy by increasing deployment replica counts."
+        ]
     elif "network" in root_cause_lower or "latency" in root_cause_lower or "connection" in root_cause_lower:
         explanation = (
             f"Network congestion, packet drop anomalies, or connectivity failures disrupt RPC communication between pods. "
@@ -108,9 +123,7 @@ You must respond with a JSON object containing exactly these keys: "explanation"
 """
 
     try:
-        # Check if Ollama url is reachable
         async with httpx.AsyncClient() as client:
-            # We use a 15-second timeout. LLM inference locally can take some time.
             print(f"[Recommendation Engine] Requesting Ollama ({OLLAMA_URL}) using model '{OLLAMA_MODEL}'...")
             response = await client.post(
                 f"{OLLAMA_URL}/api/generate",
@@ -128,7 +141,6 @@ You must respond with a JSON object containing exactly these keys: "explanation"
                 response_text = result_json.get("response", "").strip()
                 print(f"[Recommendation Engine] Ollama response: {response_text}")
                 
-                # Parse JSON response
                 parsed = json.loads(response_text)
                 explanation = parsed.get("explanation")
                 recommended_fixes = parsed.get("recommended_fixes", [])
@@ -144,17 +156,16 @@ You must respond with a JSON object containing exactly these keys: "explanation"
                 
     except Exception as e:
         print(f"[Recommendation Engine] Failed to query Ollama LLM: {e}. Cascading to SRE rule-based fallback.")
-        # Debug trace
         traceback.print_exc()
 
-    # Apply fallback if LLM failed
+
     if not used_llm:
         print("[Recommendation Engine] Applying rule-based fallback recommendations.")
         explanation, recommended_fixes, preventive_measures = get_rule_based_fallback(
             rca_report.root_cause, rca_report.affected_services
         )
     
-    # Check if a recommendation already exists for this RCA
+    # Check if recommendation already exists
     existing_rec = db.query(DBRecommendation).filter(DBRecommendation.rca_id == rca_report.id).first()
     
     if existing_rec:

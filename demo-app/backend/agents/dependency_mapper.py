@@ -4,12 +4,11 @@ import sys
 import networkx as nx
 from kubernetes import client, config
 
-# Ensure paths resolve properly
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.prometheus_service import PrometheusService
 
-# Global cache for the discovered dependency topology
+# Cache for discovered topology
 latest_topology = {
     "nodes": [],
     "edges": [],
@@ -17,9 +16,10 @@ latest_topology = {
 }
 
 async def run_dependency_mapper():
+    global latest_topology
     print("Dependency Mapper Agent started successfully.")
     
-    # Load Kubernetes Configuration
+    # Kubernetes configuration
     try:
         config.load_incluster_config()
         print("[DependencyMapper] Loaded in-cluster Kubernetes config.")
@@ -29,7 +29,7 @@ async def run_dependency_mapper():
             print("[DependencyMapper] Fallback: Loaded local kubeconfig.")
         except Exception as e:
             print(f"[DependencyMapper] CRITICAL - Failed to load Kubernetes configuration: {e}")
-            # Keep running in dummy mode if k8s is unreachable to avoid crashing backend
+            # Fallback to dummy mode if Kubernetes is unreachable
             await run_dummy_mapper_loop()
             return
 
@@ -38,15 +38,12 @@ async def run_dependency_mapper():
     
     while True:
         try:
-            # 1. Fetch Services & Pods
             services = v1.list_namespaced_service(namespace="tasksphere-app")
             pods = v1.list_namespaced_pod(namespace="tasksphere-app")
             
-            # Build nodes list
             nodes_map = {}
             for svc in services.items:
                 svc_name = svc.metadata.name
-                # Normalize name for output (e.g. database, backend, frontend)
                 short_name = svc_name.replace("-service", "")
                 if short_name == "postgres":
                     short_name = "database"
@@ -59,22 +56,19 @@ async def run_dependency_mapper():
                     "pods": 0
                 }
                 
-            # Count running pods per service mapping
             for pod in pods.items:
                 pod_name = pod.metadata.name
                 pod_phase = pod.status.phase
                 labels = pod.metadata.labels or {}
                 
-                # Check selector matches
                 for short_name, info in nodes_map.items():
                     svc_full = info["full_name"]
-                    # Usually, minikube standard selectors matches app=postgres or app=backend
                     app_label = labels.get("app", "")
                     if app_label and app_label in svc_full:
                         if pod_phase == "Running":
                             nodes_map[short_name]["pods"] += 1
             
-            # Ensure standard nodes exist
+            # Make sure default nodes are present
             for key in ["frontend", "backend", "database"]:
                 if key not in nodes_map:
                     nodes_map[key] = {
@@ -85,15 +79,13 @@ async def run_dependency_mapper():
                         "pods": 1
                     }
 
-            # 2. Build edges using NetworkX
             G = nx.DiGraph()
             for n in nodes_map:
                 G.add_node(n)
                 
-            # Inspect environment variables for static configuration references
+            # Inspect env vars for service links
             for pod in pods.items:
                 pod_name = pod.metadata.name
-                # Deduce source pod type
                 source_service = None
                 if "frontend" in pod_name:
                     source_service = "frontend"
@@ -105,18 +97,16 @@ async def run_dependency_mapper():
                 if not source_service:
                     continue
                     
-                # Look at container environment variables
                 for container in pod.spec.containers:
                     env_list = container.env or []
                     for env in env_list:
                         val = str(env.value or "")
-                        # Check if it references postgres/database or backend
                         if "postgres-service" in val or "postgres" in val:
                             G.add_edge(source_service, "database")
                         if "backend-service" in val or "backend" in val:
                             G.add_edge(source_service, "backend")
 
-            # Fallback/Merge with Prometheus traffic links
+            # Fallback/Merge with Prometheus traffic metrics
             try:
                 traffic = await prometheus_service.get_network_metrics()
                 for link in traffic:
@@ -129,13 +119,13 @@ async def run_dependency_mapper():
             except Exception as e:
                 print(f"[DependencyMapper] Error reading prometheus network traffic metrics: {e}")
 
-            # Heuristic standard fallback to keep visual consistency
+            # Fallback to default path if missing
             if not G.has_edge("frontend", "backend"):
                 G.add_edge("frontend", "backend")
             if not G.has_edge("backend", "database"):
                 G.add_edge("backend", "database")
 
-            # 3. Serialize Topology
+
             nodes_list = list(nodes_map.values())
             edges_list = []
             for u, v in G.edges():
@@ -148,7 +138,6 @@ async def run_dependency_mapper():
             for n in G.nodes():
                 adjacency[n] = list(G.successors(n))
 
-            global latest_topology
             latest_topology = {
                 "nodes": nodes_list,
                 "edges": edges_list,
@@ -156,9 +145,33 @@ async def run_dependency_mapper():
             }
             
         except Exception as e:
-            print(f"[DependencyMapper] Error in discovery loop: {e}")
+            print(f"[DependencyMapper] Error in discovery loop: {e}. Populating fallback/simulated topology.")
+            latest_topology = {
+                "nodes": [
+                    {"id": "frontend", "type": "service", "full_name": "frontend-service", "status": "active", "pods": 1},
+                    {"id": "backend", "type": "service", "full_name": "backend-service", "status": "active", "pods": 1},
+                    {"id": "database", "type": "service", "full_name": "postgres-service", "status": "active", "pods": 1}
+                ],
+                "edges": [
+                    {"source": "frontend", "target": "backend"},
+                    {"source": "backend", "target": "database"}
+                ],
+                "adjacency": {
+                    "frontend": ["backend"],
+                    "backend": ["database"],
+                    "database": []
+                }
+            }
             
-        # Refresh every 30 seconds
+        # Apply chaos overrides
+        from agents.chaos_engine import active_event
+        if active_event and active_event["event_type"] == "pod_crash":
+            target = active_event["target_service"]
+            for node in latest_topology.get("nodes", []):
+                if node["id"] == target:
+                    node["status"] = "failed"
+                    node["pods"] = 0
+            
         await asyncio.sleep(30)
 
 
@@ -166,7 +179,6 @@ async def run_dummy_mapper_loop():
     print("[DependencyMapper] Starting in dummy/fallback topology mode.")
     global latest_topology
     while True:
-        # Standard fallback layout frontend -> backend -> database
         latest_topology = {
             "nodes": [
                 {"id": "frontend", "type": "service", "full_name": "frontend-service", "status": "active", "pods": 1},

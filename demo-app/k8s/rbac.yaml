@@ -15,7 +15,7 @@ rules:
       - pods
       - services
       - endpoints
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses

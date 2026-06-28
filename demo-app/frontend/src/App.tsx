@@ -8,6 +8,7 @@ import { Monitoring } from './pages/Monitoring';
 import { DependencyGraph } from './pages/DependencyGraph';
 import { ForecastPage } from './pages/Forecast';
 import { AIInsights } from './pages/AIInsights';
+import { ChaosLab } from './pages/ChaosLab';
 import { wsService } from './services/websocket';
 import { apiService } from './services/api';
 import { useTelemetry } from './hooks/useTelemetry';
@@ -26,6 +27,7 @@ export default function App() {
 
   const [topology, setTopology] = useState<TopologyData>({ nodes: [], edges: [], adjacency: {} });
   const [rcaHistory, setRcaHistory] = useState<RCAReport[]>([]);
+  const [chaosRca, setChaosRca] = useState<RCAReport | null>(null);
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
   const [generatingRecommend, setGeneratingRecommend] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(() => {
@@ -44,14 +46,20 @@ export default function App() {
   // REST polling loop
   const fetchData = useCallback(async () => {
     try {
-      const [topo, rca, rec] = await Promise.allSettled([
+      const [topo, rca, rec, chaosRcaResult] = await Promise.allSettled([
         apiService.getDependencies(),
         apiService.getRCAHistory(),
         apiService.getLatestRecommendation(),
+        apiService.getChaosRca(),
       ]);
       if (topo.status === 'fulfilled') setTopology(topo.value);
       if (rca.status === 'fulfilled') setRcaHistory(rca.value);
       if (rec.status === 'fulfilled') setRecommendation(rec.value);
+      if (chaosRcaResult.status === 'fulfilled' && chaosRcaResult.value?.id) {
+        setChaosRca(chaosRcaResult.value);
+      } else {
+        setChaosRca(null);
+      }
     } catch { /* silent — WS status dot already shows disconnected */ }
   }, []);
 
@@ -83,18 +91,19 @@ export default function App() {
           style={{ marginTop: 'var(--navbar-height)', paddingTop: 28 }}
         >
           <Routes>
-            <Route path="/" element={<Dashboard telemetry={telemetry} />} />
+            <Route path="/" element={<Dashboard telemetry={telemetry} chaosRca={chaosRca} />} />
             <Route path="/monitoring" element={<Monitoring telemetry={telemetry} />} />
             <Route path="/topology" element={<DependencyGraph topology={topology} telemetry={telemetry} />} />
             <Route path="/forecast" element={<ForecastPage forecasts={telemetry.forecasts || []} />} />
             <Route path="/insights" element={
               <AIInsights
                 recommendation={recommendation}
-                activeRca={telemetry.active_rca}
+                activeRca={chaosRca}
                 generatingRecommend={generatingRecommend}
                 onGenerate={handleGenerateRecommendation}
               />
             } />
+            <Route path="/chaos" element={<ChaosLab telemetry={telemetry} />} />
           </Routes>
         </motion.main>
       </div>

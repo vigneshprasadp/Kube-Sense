@@ -3,7 +3,7 @@ import type { TopologyData, RCAReport, Recommendation, Forecast, Alert } from '.
 
 // Detect environment: in K8s the frontend proxies /api to backend service
 const getBaseUrl = () => {
-  if (window.location.hostname === 'localhost') return 'http://localhost:8000';
+  if (window.location.port === '5173') return 'http://localhost:8000';
   return ''; // nginx proxies /api → backend-service:8000
 };
 
@@ -62,5 +62,34 @@ export const apiService = {
       : '/api/recommendations/generate';
     const { data } = await api.post(url);
     return data?.id ? data : null;
+  },
+
+  getChaosTemplates: async (): Promise<string[]> => {
+    const { data } = await api.get('/api/chaos/templates');
+    return data;
+  },
+
+  getActiveChaosEvents: async (): Promise<any[]> => {
+    const { data } = await api.get('/api/chaos/events');
+    return data;
+  },
+
+  startChaos: async (type: string, target: string, severity: string): Promise<any> => {
+    const { data } = await api.post('/api/chaos/start', { type, target, severity });
+    return data;
+  },
+
+  stopChaos: async (eventId: string): Promise<any> => {
+    const { data } = await api.post('/api/chaos/stop', { event_id: eventId });
+    return data;
+  },
+
+  getChaosRca: async (): Promise<any> => {
+    try {
+      const { data } = await api.get('/api/chaos/rca');
+      return data;
+    } catch {
+      return null;
+    }
   },
 };

@@ -24,10 +24,11 @@ metadata:
   labels:
     app: backend
 spec:
-  type: ClusterIP
+  type: NodePort
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 30800
       name: http
   selector:
     app: backend
@@ -41,10 +42,11 @@ metadata:
   labels:
     app: frontend
 spec:
-  type: LoadBalancer
+  type: NodePort
   ports:
     - port: 80
       targetPort: 80
+      nodePort: 30080
       protocol: TCP
       name: http
   selector:

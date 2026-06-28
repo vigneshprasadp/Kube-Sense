@@ -61,6 +61,7 @@ export interface RCAReport {
   confidence_score: number;
   message: string;
   timestamp: string;
+  chaos_active?: boolean;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -115,7 +116,7 @@ export interface Recommendation {
   root_cause: string;
   severity: string;
   explanation: string;
-  recommendations: string[];
+  recommended_fixes: string[];
   preventive_measures: string[];
   model_used: string;
   created_at: string;
@@ -139,3 +140,14 @@ export interface AppSettings {
 
 export type Severity = 'Critical' | 'Warning' | 'Info' | 'Success';
 export type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
+
+export interface ChaosEvent {
+  id: string;
+  event_type: string;
+  target_service: string;
+  severity: string;
+  start_time: string;
+  status: string;
+  metadata?: string;
+}
+

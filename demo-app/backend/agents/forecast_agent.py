@@ -1,19 +1,6 @@
 """
-agents/forecast_agent.py
-────────────────────────
-Phase 10 – Predictive Saturation Forecasting Agent
-
-Uses scikit-learn LinearRegression on in-memory sliding windows of
-CPU, Storage, and Network metrics to predict:
-  - When CPU will exceed 90 % of the observed max
-  - When Storage (PVC) will exhaust its capacity
-  - When Network latency / packet-loss will cross alert thresholds
-
-For each resource × service combination the agent:
-  1. Collects a rolling window of observations (default 20 samples)
-  2. Fits LinearRegression on  [t=0, t=1, …, t=N-1]  →  [metric value]
-  3. Extrapolates forward to find the crossing point of the threshold
-  4. Persists a forecast record to Postgres and prints a human-readable ETA
+Forecasts resource saturation trends (CPU, Storage, Network)
+using linear regression over rolling window metrics.
 """
 
 import asyncio
@@ -29,7 +16,7 @@ import database.db as db_mod
 from models.forecast import DBForecast
 from services.prometheus_service import PrometheusService
 
-# ─── Tunable constants ────────────────────────────────────────────────────────
+# Tunable constants
 POLL_INTERVAL_SECONDS = 30         # How often the agent scrapes metrics
 WINDOW_SIZE           = 20         # Number of samples kept per series
 MIN_SAMPLES_REQUIRED  = 6          # Minimum samples before regression is meaningful
@@ -43,23 +30,14 @@ STORAGE_THRESHOLD_PCT = 0.85       # 85 % PVC utilisation
 NETWORK_LATENCY_MS    = 1000.0     # ms – high latency alert
 NETWORK_DROP_PCT      = 5.0        # % packet-loss threshold
 
-# ─── In-memory history stores ─────────────────────────────────────────────────
-# Each key is a string label; value is a list of (timestamp, float) tuples
+# In-memory history stores
 _cpu_history     : dict[str, list[float]] = {}
-_storage_history : dict[str, list[float]] = {}   # key = pvc_name, value = percentage_used
+_storage_history : dict[str, list[float]] = {}   # key = pvc_name
 _network_history : dict[str, list[float]] = {}   # key = "src->tgt:metric"
 
 
 def _fit_and_forecast(values: list[float], threshold: float, interval_seconds: int) -> dict:
-    """
-    Fit a LinearRegression on index → value pairs and extrapolate
-    to find how many intervals (then minutes) until the value crosses
-    the given threshold.
-
-    Returns a dict with keys:
-        slope, r_squared, current, predicted_at_horizon,
-        minutes_to_breach (None if no crossing found in range)
-    """
+    """Fits linear regression to predict minutes until threshold breach."""
     n = len(values)
     X = np.arange(n).reshape(-1, 1).astype(float)
     y = np.array(values, dtype=float)
@@ -143,7 +121,7 @@ async def _persist_forecast(
         existing.message           = message
         existing.severity          = severity
         existing.timestamp         = datetime.utcnow()
-        print(f"[ForecastAgent] Updated → {service_name} {resource_type}: {message}")
+        print(f"[ForecastAgent] Updated -> {service_name} {resource_type}: {message}")
     else:
         row = DBForecast(
             resource_type     = resource_type,
@@ -158,12 +136,12 @@ async def _persist_forecast(
             severity          = severity,
         )
         db.add(row)
-        print(f"[ForecastAgent] NEW FORECAST → {service_name} {resource_type}: {message}")
+        print(f"[ForecastAgent] NEW FORECAST -> {service_name} {resource_type}: {message}")
 
     db.commit()
 
 
-# ─── CPU Forecasting ──────────────────────────────────────────────────────────
+# CPU Forecasting
 
 async def _run_cpu_forecast(prometheus: PrometheusService, db):
     try:
@@ -216,7 +194,7 @@ async def _run_cpu_forecast(prometheus: PrometheusService, db):
         )
 
 
-# ─── Storage Forecasting ──────────────────────────────────────────────────────
+# Storage Forecasting
 
 async def _run_storage_forecast(prometheus: PrometheusService, db):
     try:
@@ -264,7 +242,7 @@ async def _run_storage_forecast(prometheus: PrometheusService, db):
         )
 
 
-# ─── Network Forecasting ──────────────────────────────────────────────────────
+# Network Forecasting
 
 async def _run_network_forecast(prometheus: PrometheusService, db):
     try:
@@ -278,7 +256,7 @@ async def _run_network_forecast(prometheus: PrometheusService, db):
         tgt = link["target_service"]
         label = f"{src}->{tgt}"
 
-        # ── Latency ──
+        # Latency
         latency = link.get("latency_ms", 0.0)
         _append_window(_network_history, f"{label}:latency", latency)
         lat_history = _network_history[f"{label}:latency"]
@@ -301,7 +279,7 @@ async def _run_network_forecast(prometheus: PrometheusService, db):
                     db, "network_latency", label, latency, NETWORK_LATENCY_MS, fc, msg, sev
                 )
 
-        # ── Packet Loss ──
+        # Packet Loss
         drop = link.get("packet_loss_rate", 0.0)
         _append_window(_network_history, f"{label}:drop", drop)
         drop_history = _network_history[f"{label}:drop"]
@@ -325,7 +303,7 @@ async def _run_network_forecast(prometheus: PrometheusService, db):
                 )
 
 
-# ─── Main agent loop ──────────────────────────────────────────────────────────
+# Main agent loop
 
 async def run_forecast_agent():
     print("[ForecastAgent] Predictive Saturation Forecast Agent started.")

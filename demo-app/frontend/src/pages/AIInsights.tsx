@@ -31,41 +31,47 @@ export function AIInsights({ recommendation, activeRca, generatingRecommend, onG
             <div className="p-1.5 bg-purple-100 rounded-lg"><Bot className="h-4 w-4 text-purple-600" /></div>
             <h2 className="page-header-title">AI Operations Center</h2>
           </div>
-          <p className="page-header-subtitle">Powered by Ollama Llama 3 · Root Cause Analysis & SRE Recommendations</p>
+          <p className="page-header-subtitle">Root Cause Analysis & SRE Recommendations</p>
         </div>
-        <button
-          onClick={() => onGenerate(activeRca?.id)}
-          disabled={generatingRecommend}
-          className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 text-white text-sm font-600 rounded-xl transition-colors"
-        >
-          {generatingRecommend ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          {generatingRecommend ? 'Analyzing...' : 'Run AI Analysis'}
-        </button>
       </div>
 
       {/* Active RCA Card */}
       {activeRca && (
-        <div className="solid-card p-6 border border-danger-100 bg-danger-50/30">
+        <div className={`solid-card p-6 border ${
+          activeRca.chaos_active
+            ? 'border-danger-100 bg-danger-50/30'
+            : 'border-surface-200 bg-surface-50/30'
+        }`}>
           <div className="flex items-start gap-4">
-            <div className="p-3 bg-danger-100 rounded-xl flex-shrink-0">
-              <ShieldAlert className="h-6 w-6 text-danger-600" />
+            <div className={`p-3 rounded-xl flex-shrink-0 ${
+              activeRca.chaos_active ? 'bg-danger-100' : 'bg-surface-100'
+            }`}>
+              <ShieldAlert className={`h-6 w-6 ${
+                activeRca.chaos_active ? 'text-danger-600' : 'text-surface-500'
+              }`} />
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-2 flex-wrap">
-                <h3 className="text-base font-700 text-surface-900">Active Root Cause</h3>
-                <Badge severity={activeRca.severity} />
+                <h3 className="text-base font-700 text-surface-900">
+                  {activeRca.chaos_active ? 'Active Root Cause' : 'Last Root Cause'}
+                </h3>
+                <Badge severity={activeRca.chaos_active ? activeRca.severity : 'Info'} />
               </div>
-              <p className="text-sm font-700 text-danger-700 mb-1">{activeRca.root_cause}</p>
+              <p className={`text-sm font-700 mb-1 ${
+                activeRca.chaos_active ? 'text-danger-700' : 'text-surface-700'
+              }`}>{activeRca.root_cause}</p>
               <p className="text-sm text-surface-600 leading-relaxed">{activeRca.message}</p>
               <div className="flex items-center gap-6 mt-3 text-xs font-600 text-surface-500">
-                <span>Affected: <span className="text-danger-600">{activeRca.affected_services}</span></span>
-                <span>Confidence: <span className="text-danger-600">{Math.round(activeRca.confidence_score * 100)}%</span></span>
+                <span>Affected: <span className={activeRca.chaos_active ? 'text-danger-600' : 'text-surface-600'}>{activeRca.affected_services}</span></span>
+                <span>Confidence: <span className={activeRca.chaos_active ? 'text-danger-600' : 'text-surface-600'}>{Math.round(activeRca.confidence_score * 100)}%</span></span>
                 <span>Time: {new Date(activeRca.timestamp).toLocaleTimeString()}</span>
               </div>
               {/* Confidence bar */}
               <div className="mt-3 h-1.5 bg-surface-200 rounded-full overflow-hidden">
                 <motion.div
-                  className="h-full bg-danger-500 rounded-full"
+                  className={`h-full rounded-full ${
+                    activeRca.chaos_active ? 'bg-danger-500' : 'bg-surface-500'
+                  }`}
                   initial={{ width: 0 }}
                   animate={{ width: `${Math.round(activeRca.confidence_score * 100)}%` }}
                   transition={{ duration: 0.8 }}
@@ -82,20 +88,10 @@ export function AIInsights({ recommendation, activeRca, generatingRecommend, onG
             <Bot className="h-10 w-10 text-purple-400" />
           </div>
           <h3 className="text-base font-700 text-surface-700">No AI Analysis Yet</h3>
-          <p className="text-sm text-surface-400 mt-2 max-w-sm">Click "Run AI Analysis" to generate intelligent root cause explanations and SRE remediation steps.</p>
+          <p className="text-sm text-surface-400 mt-2 max-w-sm">Waiting for the AI Operations Center to generate SRE recommendations for the active incident.</p>
         </div>
       ) : (
         <div className="space-y-5">
-          {/* AI Metadata Bar */}
-          <div className="flex items-center gap-4 px-5 py-3 bg-purple-50/70 border border-purple-100 rounded-2xl text-xs font-500 text-purple-700">
-            <Sparkles className="h-4 w-4" />
-            <span>Generated by <strong>{recommendation.model_used || 'Llama 3'}</strong></span>
-            <span className="text-purple-300">·</span>
-            <span>{new Date(recommendation.created_at).toLocaleString()}</span>
-            <span className="text-purple-300">·</span>
-            <Badge severity="Purple" label="AI Generated" size="sm" />
-          </div>
-
           {/* Explanation */}
           <div className="solid-card p-6">
             <div className="flex items-center gap-2 mb-4">
@@ -113,11 +109,11 @@ export function AIInsights({ recommendation, activeRca, generatingRecommend, onG
                 <h3 className="text-sm font-700 text-surface-900">Remediation Actions</h3>
               </div>
               <span className="text-xs text-surface-400 font-500">
-                {checkedItems.size}/{(recommendation.recommendations || []).length} completed
+                {checkedItems.size}/{(recommendation.recommended_fixes || []).length} completed
               </span>
             </div>
             <div className="space-y-2.5">
-              {(recommendation.recommendations || []).map((rec, i) => (
+              {(recommendation.recommended_fixes || []).map((rec, i) => (
                 <button
                   key={i}
                   onClick={() => toggleCheck(i)}

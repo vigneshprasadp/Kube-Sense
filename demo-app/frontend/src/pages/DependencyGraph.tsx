@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect } from 'react';
-import ReactFlow, { Background, Controls, MiniMap, useNodesState, useEdgesState, MarkerType } from 'reactflow';
+import ReactFlow, { Background, Controls, useNodesState, useEdgesState, MarkerType } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Server, Network, Cpu, HardDrive } from 'lucide-react';
 import { ServiceNodeComponent } from '../components/graph/ServiceNode';
+import { apiService } from '../services/api';
 import type { TopologyData, ServiceNode } from '../types';
 
 const nodeTypes = { service: ServiceNodeComponent };
@@ -24,37 +25,158 @@ export function DependencyGraph({ topology, telemetry }: DependencyGraphProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selected, setSelected] = useState<ServiceNode | null>(null);
+  // Track active chaos events fetched independently
+  const [activeChaosEvents, setActiveChaosEvents] = useState<any[]>([]);
+
+  // Poll active chaos events
+  useEffect(() => {
+    const fetchChaos = async () => {
+      try {
+        const events = await apiService.getActiveChaosEvents();
+        setActiveChaosEvents(Array.isArray(events) ? events : []);
+      } catch {
+        setActiveChaosEvents([]);
+      }
+    };
+    fetchChaos();
+    const interval = setInterval(fetchChaos, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!topology?.nodes) return;
+
+    // Active chaos event details
+    const chaosEvent = activeChaosEvents[0] ?? null;
+    const chaosTarget  = chaosEvent?.target_service?.toLowerCase() ?? null;
+    const chaosType    = chaosEvent?.event_type?.toLowerCase() ?? null;
+
+    const chaosElapsed = chaosEvent
+      ? (Date.now() - new Date(chaosEvent.start_time).getTime()) / 1000
+      : 0;
+
+    const chaosIntensity = (maxSeconds: number): number =>
+      Math.min((chaosElapsed / maxSeconds) * 100, 95);
+
+    // Compute load score per service
+    const getLoadPercent = (nodeId: string): number => {
+      const name = nodeId.toLowerCase();
+      const metrics  = telemetry?.metrics  || {};
+      const pvcs: any[] = telemetry?.pvc_metrics || [];
+
+      // Chaos-driven overrides
+      if (chaosTarget === name || (name === 'database' && chaosTarget === 'database')) {
+        switch (chaosType) {
+          case 'cpu':
+          case 'memory':
+            return chaosIntensity(120);
+          case 'storage':
+            if (name === 'database') return chaosIntensity(150);
+            break;
+          case 'network':
+            return Math.min(chaosIntensity(90), 70);
+          case 'pod_crash':
+            return 100;
+        }
+      }
+
+      // Database PVC usage
+      if (name === 'database') {
+        const pg = pvcs.filter((p: any) =>
+          (p.pvc_name || '').toLowerCase().includes('postgres')
+        );
+        if (pg.length === 0) return 0;
+        return Math.max(...pg.map((p: any) => p.percentage_used ?? 0));
+      }
+
+      // Standard service pods load
+      const matchKeys = Object.keys(metrics).filter(k =>
+        k.toLowerCase().startsWith(name)
+      );
+      if (matchKeys.length === 0) return 0;
+
+      const totalCores = matchKeys.reduce(
+        (sum, k) => sum + (metrics[k]?.cpu_cores ?? 0), 0
+      );
+      const cpuLoad = Math.min(totalCores * 100, 100);
+
+      const totalMemMb = matchKeys.reduce(
+        (sum, k) => sum + (metrics[k]?.memory_mb ?? 0), 0
+      );
+      const memLoad = Math.min((totalMemMb / 1024) * 100, 100);
+
+      return Math.max(cpuLoad, memLoad);
+    };
+
+    // Edge styles based on traffic and chaos
+    const getEdgeStyle = (source: string, target: string) => {
+      if (
+        chaosType === 'network' &&
+        (chaosTarget === source || chaosTarget === target)
+      ) {
+        return { color: '#EF4444', width: 3 };
+      }
+      if (
+        chaosType === 'pod_crash' &&
+        (chaosTarget === source || chaosTarget === target)
+      ) {
+        return { color: '#EF4444', width: 3 };
+      }
+
+      const link = (telemetry?.net_metrics || []).find(
+        (l: any) => l.source_service === source && l.target_service === target
+      );
+      if (!link) return { color: '#14B8A6', width: 2 };
+      if (link.latency_ms > 500 || link.packet_loss_rate > 5)
+        return { color: '#EF4444', width: 3 };
+      if (link.latency_ms > 150 || link.packet_loss_rate > 1)
+        return { color: '#F97316', width: 2.5 };
+      return { color: '#14B8A6', width: 2 };
+    };
+
+    // Node status derivation
+    const getNodeStatus = (n: ServiceNode): 'active' | 'warning' | 'error' => {
+      const name = n.id.toLowerCase();
+      if (chaosTarget === name) {
+        const load = getLoadPercent(name);
+        if (load >= 85 || chaosType === 'pod_crash') return 'error';
+        if (load >= 40) return 'warning';
+      }
+      return n.status;
+    };
 
     const flowNodes = topology.nodes.map(n => ({
       id: n.id,
       type: 'service',
       position: POSITIONS[n.id] || { x: 100, y: 100 },
       data: {
-        label: n.id,
-        status: n.status,
-        pods: n.pods,
-        fullName: n.full_name,
-        cpuCores: telemetry?.metrics?.[n.id]?.cpu_cores,
-        memoryMb: telemetry?.metrics?.[n.id]?.memory_mb,
+        label:       n.id,
+        status:      getNodeStatus(n),
+        pods:        n.pods,
+        fullName:    n.full_name,
+        cpuCores:    telemetry?.metrics?.[n.id]?.cpu_cores,
+        memoryMb:    telemetry?.metrics?.[n.id]?.memory_mb,
+        loadPercent: getLoadPercent(n.id),
+        chaosType:   chaosTarget === n.id.toLowerCase() ? chaosType : null,
       },
     }));
 
-    const flowEdges = (topology.edges || []).map((e, i) => ({
-      id: `e-${i}-${e.source}-${e.target}`,
-      source: e.source,
-      target: e.target,
-      type: 'smoothstep',
-      animated: true,
-      markerEnd: { type: MarkerType.ArrowClosed, color: '#14B8A6', width: 16, height: 16 },
-      style: { stroke: '#14B8A6', strokeWidth: 2 },
-    }));
+    const flowEdges = (topology.edges || []).map((e, i) => {
+      const es = getEdgeStyle(e.source, e.target);
+      return {
+        id: `e-${i}-${e.source}-${e.target}`,
+        source: e.source,
+        target: e.target,
+        type: 'smoothstep',
+        animated: true,
+        markerEnd: { type: MarkerType.ArrowClosed, color: es.color, width: 16, height: 16 },
+        style: { stroke: es.color, strokeWidth: es.width },
+      };
+    });
 
     setNodes(flowNodes);
     setEdges(flowEdges);
-  }, [topology, telemetry]);
+  }, [topology, telemetry, activeChaosEvents]);
 
   const onNodeClick = useCallback((_: any, node: any) => {
     const found = topology?.nodes?.find(n => n.id === node.id);
@@ -72,16 +194,28 @@ export function DependencyGraph({ topology, telemetry }: DependencyGraphProps) {
           <p className="page-header-subtitle">Real-time Kubernetes service topology and health visualization</p>
         </div>
         <div className="flex items-center gap-3 text-xs font-500 text-surface-400">
-          {[{ color: 'bg-success-500', label: 'Healthy' }, { color: 'bg-warning-500', label: 'Warning' }, { color: 'bg-danger-600', label: 'Critical' }].map(l => (
+          {[
+            { color: 'bg-success-500', label: 'Healthy'  },
+            { color: 'bg-warning-500', label: 'Warning'  },
+            { color: 'bg-danger-600',  label: 'Critical' },
+          ].map(l => (
             <span key={l.label} className="flex items-center gap-1.5">
               <span className={`w-2 h-2 rounded-full ${l.color}`} />
               {l.label}
             </span>
           ))}
+          {activeChaosEvents.length > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-0.5 bg-red-50 border border-red-200 rounded-full">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-red-600 font-600">
+                Chaos: {activeChaosEvents[0].event_type} on {activeChaosEvents[0].target_service}
+              </span>
+            </span>
+          )}
         </div>
       </div>
 
-      <div className="solid-card overflow-hidden" style={{ height: 560 }}>
+      <div className="solid-card overflow-hidden" style={{ height: 'calc(100vh - 220px)', minHeight: 560 }}>
         {topology?.nodes?.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-300">
             <Network className="h-12 w-12 mb-3" />
@@ -101,15 +235,11 @@ export function DependencyGraph({ topology, telemetry }: DependencyGraphProps) {
           >
             <Background color="#CBD5E1" gap={24} size={1} />
             <Controls />
-            <MiniMap nodeColor={(n) => {
-              const st = n.data?.status;
-              return st === 'active' ? '#16A34A' : st === 'warning' ? '#F59E0B' : '#DC2626';
-            }} />
           </ReactFlow>
         )}
       </div>
 
-      {/* Node Drawer */}
+      {/* Sidebar Drawer */}
       <AnimatePresence>
         {selected && (
           <motion.div

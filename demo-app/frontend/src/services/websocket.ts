@@ -4,7 +4,7 @@ type TelemetryCallback = (data: Telemetry) => void;
 type StatusCallback = (status: ConnectionStatus) => void;
 
 const getWsUrl = () => {
-  if (window.location.hostname === 'localhost') return 'ws://localhost:8000/api/ws/telemetry';
+  if (window.location.port === '5173') return 'ws://localhost:8000/api/ws/telemetry';
   return `ws://${window.location.host}/api/ws/telemetry`;
 };
 
@@ -14,14 +14,17 @@ class WebSocketService {
   private statusListeners: Set<StatusCallback> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private active = false;
+  private retryCount = 0;
 
   connect() {
     this.active = true;
+    this.retryCount = 0;
     this.open();
   }
 
   disconnect() {
     this.active = false;
+    this.retryCount = 0;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.ws) {
       this.ws.onclose = null;
@@ -48,6 +51,7 @@ class WebSocketService {
 
       this.ws.onopen = () => {
         console.log('[WS] Connected');
+        this.retryCount = 0;
         this.notifyStatus('connected');
       };
 
@@ -63,10 +67,13 @@ class WebSocketService {
       };
 
       this.ws.onclose = () => {
-        console.log('[WS] Disconnected. Retrying in 4s...');
+        // Exponential backoff: 1s → 1.5s → 2.25s → max 5s
+        const delay = Math.min(1000 * Math.pow(1.5, Math.min(this.retryCount, 3)), 5000);
+        this.retryCount++;
+        console.log(`[WS] Disconnected. Retrying in ${Math.round(delay)}ms... (attempt ${this.retryCount})`);
         this.notifyStatus('reconnecting');
         if (this.active) {
-          this.reconnectTimer = setTimeout(() => this.open(), 4000);
+          this.reconnectTimer = setTimeout(() => this.open(), delay);
         }
       };
 

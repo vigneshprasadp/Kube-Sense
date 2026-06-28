@@ -50,14 +50,26 @@ async def trigger_generation(rca_id: Optional[int] = None, db: Session = Depends
     """
     Generate SRE recommendation narrative for a specific RCA report (or the latest report).
     """
+    from models.chaos_event import DBChaosEvent
     # 1. Fetch RCA report
     if rca_id:
         rca_report = db.query(DBRootCauseReport).filter(DBRootCauseReport.id == rca_id).first()
         if not rca_report:
             raise HTTPException(status_code=404, detail=f"RCA Report with ID {rca_id} not found.")
     else:
-        # Fall back to latest RCA report
-        rca_report = db.query(DBRootCauseReport).order_by(DBRootCauseReport.id.desc()).first()
+        # Check if there is an active chaos — prefer its RCA if available
+        active_chaos = db.query(DBChaosEvent).filter(
+            DBChaosEvent.status == "active"
+        ).order_by(DBChaosEvent.id.desc()).first()
+
+        if active_chaos:
+            rca_report = db.query(DBRootCauseReport).filter(
+                DBRootCauseReport.timestamp >= active_chaos.start_time
+            ).order_by(DBRootCauseReport.id.desc()).first()
+
+        if not active_chaos or not rca_report:
+            # Fall back to latest RCA report
+            rca_report = db.query(DBRootCauseReport).order_by(DBRootCauseReport.id.desc()).first()
         if not rca_report:
             raise HTTPException(status_code=400, detail="No RCA reports found in database to generate recommendations for.")
             
@@ -69,10 +81,37 @@ async def trigger_generation(rca_id: Optional[int] = None, db: Session = Depends
         raise HTTPException(status_code=500, detail=f"Failed to generate recommendation: {str(e)}")
 
 @router.get("/latest", response_model=Optional[RecommendationReport])
-def get_latest_recommendation(db: Session = Depends(get_db)):
+async def get_latest_recommendation(db: Session = Depends(get_db)):
     """
-    Retrieve the most recent generated recommendation report.
+    Retrieve the most recent generated recommendation report, matched to the
+    most recent RCA so that the explanation always reflects the current incident.
+    If no recommendation exists for the latest RCA, dynamically generate it.
     """
+    # First try to find recommendation tied to the most recent RCA report
+    latest_rca = db.query(DBRootCauseReport).order_by(DBRootCauseReport.id.desc()).first()
+    if latest_rca:
+        # Look for a recommendation linked to this RCA
+        db_rec = db.query(DBRecommendation).filter(
+            DBRecommendation.rca_id == latest_rca.id
+        ).order_by(DBRecommendation.id.desc()).first()
+        if db_rec:
+            return format_recommendation_response(db_rec)
+        # Also check by root_cause string match (for recommendations created before rca_id linking)
+        db_rec = db.query(DBRecommendation).filter(
+            DBRecommendation.root_cause == latest_rca.root_cause
+        ).order_by(DBRecommendation.id.desc()).first()
+        if db_rec:
+            return format_recommendation_response(db_rec)
+            
+        # Dynamically generate on-the-fly if not found
+        try:
+            db_rec = await generate_recommendation(latest_rca, db)
+            if db_rec:
+                return format_recommendation_response(db_rec)
+        except Exception as e:
+            print(f"[Recommendation API] Failed to dynamically generate recommendation: {e}")
+            
+    # Fallback: absolute latest recommendation row
     db_rec = db.query(DBRecommendation).order_by(DBRecommendation.id.desc()).first()
     if not db_rec:
         return None

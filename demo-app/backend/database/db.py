@@ -22,20 +22,26 @@ def init_db():
     global engine, SessionLocal
     print(f"Connecting to database at: postgresql://{DB_USER}:****@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     
-    for attempt in range(1, 11):
+    connected = False
+    for attempt in range(1, 4):
         try:
             engine = create_engine(DATABASE_URL)
             with engine.connect() as connection:
                 print("Successfully connected to the database!")
+                connected = True
                 break
         except Exception as e:
             print(f"Database connection attempt {attempt} failed: {e}")
-            if attempt == 10:
-                print("Could not connect to the database. Exiting.")
-                raise e
-            time.sleep(3)
+            if attempt < 3:
+                time.sleep(1)
+                
+    if not connected:
+        print("Could not connect to PostgreSQL. Falling back to local SQLite database (tasksphere.db)...")
+        sqlite_url = "sqlite:///tasksphere.db"
+        engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
             
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 # Dependency for retrieving database session context
 def get_db():

@@ -16,6 +16,7 @@ const navItems = [
   { to: '/topology',   label: 'Dependency Graph', icon: GitFork },
   { to: '/forecast',   label: 'Forecast',         icon: TrendingUp },
   { to: '/insights',   label: 'AI Insights',      icon: Bot },
+  { to: '/chaos',      label: 'Chaos Lab',        icon: Zap },
 ];
 
 const STATUS_CONFIG: Record<ConnectionStatus, { dot: string; text: string; label: string }> = {

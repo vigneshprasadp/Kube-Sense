@@ -1,0 +1,216 @@
+================================================================================
+           KUBESENSE (TASKSPHERE) - SYSTEM DESIGN & CODEBASE DOCUMENTATION
+================================================================================
+
+1. PROJECT OVERVIEW & GOAL
+--------------------------------------------------------------------------------
+KubeSense (also referred to as TaskSphere) is an advanced, AI-powered Kubernetes
+observability and monitoring platform designed to simplify container orchestration 
+management. It is built to monitor cluster performance, automatically discover 
+service topologies, identify bottlenecks, detect anomalies, predict future 
+resource breaches using machine learning, and compute the root causes of incidents.
+
+Key Problems Solved:
+* Real-Time Telemetry: Aggregates real-time CPU, PVC storage usage, and network 
+  metrics directly from Prometheus (or falls back to built-in simulation drivers).
+* AI/ML Saturation Forecasting: Tells developers/DevOps teams exactly when 
+  a service is projected to run out of CPU, memory, or disk storage capacity.
+* Dependency Mapping: Maps cluster architecture dynamically, visually representing
+  relationships between services, pods, and storage.
+* Automated Root Cause Analysis (RCA): Runs correlation models to deduce the 
+  triggering event behind complex, cascading failures across service meshes.
+
+--------------------------------------------------------------------------------
+2. PROJECT DIRECTORY STRUCTURE
+--------------------------------------------------------------------------------
+The project is split into three main components:
+* /demo-app/backend/  - FastAPI backend, database models, and background AI agents.
+* /demo-app/frontend/ - Vite + React + TypeScript web client interface.
+* /demo-app/k8s/      - Kubernetes manifests (namespace, deployments, services,
+                        Prometheus configurations, RBAC controls).
+
+Detailed breakdown:
+demo-app/
+├── backend/
+│   ├── agents/          # Background tasks (monitoring, mapping, forecasting)
+│   │   ├── cpu_agent.py
+│   │   ├── storage_agent.py
+│   │   ├── network_agent.py
+│   │   ├── dependency_mapper.py
+│   │   └── forecast_agent.py
+│   ├── api/             # REST controllers for API routes
+│   │   ├── alerts.py, metrics.py, dependencies.py, rca.py, ...
+│   │   └── tasks.py     # Simple task management routing
+│   ├── database/        # Database adapter logic (db.py)
+│   ├── models/          # SQLAlchemy definitions & Pydantic validation schemas
+│   ├── correlation/     # Root Cause Analysis correlation engine
+│   ├── services/        # Prometheus HTTP query client (prometheus_service.py)
+│   ├── Dockerfile       # Backend container build script
+│   └── main.py          # FastAPI application entrypoint & startup routing
+├── frontend/
+│   ├── src/             # React source code (components, pages, services)
+│   ├── index.html       # Client entry page
+│   ├── nginx.conf       # Production container routing and reverse proxy
+│   ├── package.json     # Node.js configuration
+│   └── Dockerfile       # Frontend build and Nginx deployment container
+└── k8s/
+    ├── namespace.yaml   # Creates namespace 'tasksphere-app'
+    ├── deployment.yaml  # Configures Postgres, Backend, and Frontend workloads
+    ├── service.yaml     # Exposes services (ClusterIP/LoadBalancer ports)
+    ├── rbac.yaml        # Access roles for API querying inside the cluster
+    └── prometheus.yaml  # Configures Prometheus server for metrics aggregation
+
+--------------------------------------------------------------------------------
+3. BACKEND SYSTEM & CODEBASE ARCHITECTURE
+--------------------------------------------------------------------------------
+The backend is written in Python using FastAPI, leveraging asynchronous event 
+loops to manage API endpoints, WebSocket streaming, and multiple concurrent background 
+agents.
+
+Database Layer (database/db.py):
+* Uses SQLAlchemy ORM to manage state.
+* Dual-Adapter Database Engine: Built to operate seamlessly across environments:
+  - Attempt 1: Automatically attempts to connect to the PostgreSQL instance 
+    (postgres-service:5432/tasksphere) inside the Kubernetes cluster.
+  - Attempt 2: If PostgreSQL is unreachable or connection credentials fail, it 
+    silently falls back to a local SQLite database (`tasksphere.db`) in the CWD.
+* On startup (`main.py`), it runs DDL commands (`create_all()`) to automatically 
+  create the database tables. No manual database setup or setup commands are required.
+
+REST & WebSocket API Endpoints (main.py, api/):
+* GET /api/dependencies       - Retrieves the discovered service topology graph.
+* GET /api/metrics/cpu        - Fetches real-time CPU metric parameters.
+* GET /api/rca                - Fetches recent Root Cause Analysis reports.
+* GET /api/recommendations/   - Retrieves AI optimization suggestions.
+* WS  /api/ws/telemetry       - Real-time high-frequency WebSocket. Every 5 seconds, 
+                                it aggregates system health metrics, storage capacities, 
+                                network drops, alerts, active RCA, and ML forecasts 
+                                into a unified JSON payload and streams it to the UI.
+
+--------------------------------------------------------------------------------
+4. IN-DEPTH BACKGROUND AGENTS & WORKER LOOPS
+--------------------------------------------------------------------------------
+FastAPI starts several background asyncio workers at server startup. These loops 
+run continuously to gather telemetry, evaluate trends, and alert on incidents:
+
+A. CPU, Storage, and Network Agents (agents/):
+* Scraping Loop: Queries the `PrometheusService` class every 30 seconds for 
+  cAdvisor and node-exporter telemetry metrics.
+* Standalone Fallback: If Prometheus is not deployed or returns HTTP connection 
+  errors (which occurs during local development outside Kubernetes), the service 
+  automatically falls back to stateful mathematical simulations (e.g. mock memory 
+  leak increases, random CPU spikes, latency jumps) to provide dynamic demo data.
+* Alert Generation: If resource levels exceed thresholds, the agents create a DB 
+  record in the `alerts` or `network_alerts` table.
+
+B. Dependency Mapper (agents/dependency_mapper.py):
+* Discovery Mechanism: 
+  - Uses the `kubernetes` Python client to query the API server for all services 
+    and pods in the `tasksphere-app` namespace.
+  - Inspects container environment variables to check for references to other 
+    services (e.g., checking if the backend pod contains `POSTGRES_HOST`).
+  - Calls Prometheus to fetch network communication metrics (receive/transmit bytes).
+* Graph Formulation: Formulates the service mesh utilizing `networkx` Directed 
+  Graphs (`DiGraph`). It maps links, counts pods per service, and maps adjacency.
+* Graceful Fallback: If the Kubernetes cluster API is down/unreachable, it catches 
+  the exception and populates the default service mesh: 
+  `frontend` -> `backend` -> `database`.
+
+C. Predictive Saturation Forecasting (agents/forecast_agent.py):
+* Time-Series History: Stores rolling metrics history arrays in memory (default: 
+  last 20 samples).
+* Linear Regression Model: Fits a scikit-learn `LinearRegression` model 
+  ([time indexes] vs [resource values]).
+* Extrapolation: Computes the slope and the goodness-of-fit coefficient (R²). If 
+  the slope is positive (increasing usage), it calculates how many intervals 
+  remain before the metric breaches the warning/critical threshold:
+  - CPU Threshold: 90% of rolling max limit.
+  - Storage Threshold: 85% PVC capacity limit.
+* Persisted Forecasts: Writes dynamic estimations to the `forecasts` table, 
+  updating ETAs and suppressing duplicate alert writes within a 3-minute window.
+* Windows Compatibility: Operates cleanly on all operating systems by using ASCII 
+  safe strings for console logging (avoiding Windows `cp1252` encoding errors).
+
+D. Root Cause Analysis (RCA) Engine (correlation/root_cause_engine.py):
+* Trigger: Wakes up every 20 seconds. If any CPU, storage, or network alerts are 
+  detected in the DB, it triggers correlation workflows.
+* correlation logic:
+  - Gathers recent active topology links.
+  - Queries Kubernetes events (such as pod failures, eviction warnings, or 
+    scheduler issues) from the API.
+  - Performs multi-dimensional scoring:
+    * CPU alerts (40% weight)
+    * Storage alerts (30% weight)
+    * Network drop/latency alerts (20% weight)
+    * Dependency-chain mapping (10% weight): If a downstream service (like 
+      the database) has issues, it increases the confidence score of the parent.
+  - Logs the report in the `root_causes` table with the computed confidence score 
+    and detailed bullet points explaining the evidence chain.
+
+--------------------------------------------------------------------------------
+5. FRONTEND SYSTEM
+--------------------------------------------------------------------------------
+The frontend is a single-page React application built using Vite, TypeScript, and
+styled with custom Vanilla CSS for visual excellence.
+
+Key Features:
+* UI/UX Design: Curated dark-themed dashboards, smooth glassmorphism containers, 
+  custom typography, and Framer Motion micro-animations.
+* Live Telemetry Dashboard: Displays cluster gauges (CPU cores, memory, 
+  active incidents, healthy nodes) and renders charts (Recharts) with live 
+  updates synced via the WebSocket connection.
+* Topology Map: Visualizes the service mesh dynamically using ReactFlow. Renders 
+  dependency node cards with real-time status borders (Healthy = Green, Warning = 
+  Orange, Critical = Red), pod replications, and active arrows showing data flow.
+* State Synchronization: Manages backend queries with TanStack React Query.
+
+--------------------------------------------------------------------------------
+6. KUBERNETES DEPLOYMENT & NETWORKING INFRASTRUCTURE
+--------------------------------------------------------------------------------
+All components are deployed under the namespace `tasksphere-app`:
+
+A. Workload Deployment:
+* postgres-deployment: Runs `postgres:15-alpine`. Mounts the PVC `postgres-pvc` 
+  to `/var/lib/postgresql/data` for persistent SQL database state.
+* backend-deployment: Runs `tasksphere-backend:latest`. Connects to postgres 
+  utilizing ConfigMap configurations and secret credentials.
+* frontend-deployment: Runs `kubesense-frontend:v2`.
+
+B. Nginx Gatekeeping and Reverse Proxying (frontend/nginx.conf):
+* When deployed inside Kubernetes, the frontend Docker image serves compiled 
+  static React assets using an **Nginx** server.
+* Nginx proxy rules:
+  - If a browser requests `/api/...`, Nginx catches the request and proxies it 
+    internally to `http://backend-service:8000/api/...`.
+  - Upgrades request connection headers to `"upgrade"` to allow WebSockets.
+* Benefit: By proxying backend calls internally inside the Kubernetes network, 
+  **you only need to port-forward the frontend service (`8080:80`)**. You do not 
+  need separate port-forwards for the backend or database, ensuring a single 
+  entrypoint for the user.
+
+C. Prometheus server (k8s/prometheus.yaml):
+* Spins up a Prometheus agent inside the cluster.
+* Automatically scrapes metrics from the cAdvisor process running on the host 
+  machine, feeding live Kubernetes pod statistics to the backend monitoring endpoints.
+
+--------------------------------------------------------------------------------
+7. OPERATIONAL GUIDELINE & WORKFLOW
+--------------------------------------------------------------------------------
+Deploying the stack to Minikube:
+1. Ensure Docker Desktop is active.
+2. Start Minikube: `minikube start --driver=docker`
+3. Build the backend image: `docker build -t tasksphere-backend:latest ./demo-app/backend`
+4. Build the frontend image: `docker build -t kubesense-frontend:v2 ./demo-app/frontend`
+5. Load images to Minikube registry:
+   - `minikube image load tasksphere-backend:latest`
+   - `minikube image load kubesense-frontend:v2`
+6. Apply manifests:
+   `kubectl apply -f demo-app/k8s/namespace.yaml`
+   `kubectl apply -f demo-app/k8s/deployment.yaml`
+   `kubectl apply -f demo-app/k8s/service.yaml`
+   `kubectl apply -f demo-app/k8s/rbac.yaml`
+   `kubectl apply -f demo-app/k8s/prometheus.yaml`
+7. Port-forward the frontend:
+   `kubectl port-forward svc/frontend-service 8080:80 -n tasksphere-app`
+8. Open the web interface at: `http://localhost:8080`
+================================================================================

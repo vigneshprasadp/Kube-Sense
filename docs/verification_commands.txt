@@ -1,0 +1,135 @@
+================================================================================
+          KUBESENSE DIAGNOSTIC COMMANDS: CPU, STORAGE, & NETWORK METRICS
+================================================================================
+
+This guide contains commands to verify CPU, Storage, and Network loads for the
+KubeSense application. It is split into two sections: Terminal (CLI) verification
+and Docker Desktop (GUI/CLI) verification.
+
+--------------------------------------------------------------------------------
+PART 1: TERMINAL / CLI VERIFICATION (KUBERNETES)
+--------------------------------------------------------------------------------
+
+1. CPU LOAD VERIFICATION
+=========================================
+* Get real-time CPU core consumption for all pods in the namespace:
+  > kubectl top pods -n tasksphere-app
+
+* Get CPU usage for a specific pod (e.g., backend):
+  > kubectl top pod -l app=backend -n tasksphere-app
+
+* Read cgroups CPU statistics directly inside the backend container:
+  > kubectl exec -it -n tasksphere-app deployment/backend-deployment -c backend -- cat /sys/fs/cgroup/cpu.stat
+
+* Read CPU load average (1, 5, and 15-minute load averages) inside the container:
+  > kubectl exec -it -n tasksphere-app deployment/backend-deployment -c backend -- cat /proc/loadavg
+
+
+2. STORAGE SATURATION VERIFICATION
+=========================================
+* Check Persistent Volume Claims (PVC) configuration, capacity, and status:
+  > kubectl get pvc -n tasksphere-app
+
+* Describe the PostgreSQL PVC to inspect capacity bounds and provisioning events:
+  > kubectl describe pvc postgres-pvc -n tasksphere-app
+
+* Check disk storage usage inside the postgres database container (using df):
+  > kubectl exec -it -n tasksphere-app deployment/postgres-deployment -c postgres -- df -h /var/lib/postgresql/data
+
+* Check filesystem write descriptors inside the PostgreSQL container:
+  > kubectl exec -it -n tasksphere-app deployment/postgres-deployment -c postgres -- ls -lh /var/lib/postgresql/data
+
+
+3. NETWORK LATENCY & THROUGHPUT VERIFICATION
+=========================================
+* Read container network interface statistics (bytes received/transmitted) inside backend:
+  > kubectl exec -it -n tasksphere-app deployment/backend-deployment -c backend -- cat /proc/net/dev
+
+* View active TCP connections and network sockets inside the backend:
+  > kubectl exec -it -n tasksphere-app deployment/backend-deployment -c backend -- ss -t -a
+  (Or fallback if ss is missing):
+  > kubectl exec -it -n tasksphere-app deployment/backend-deployment -c backend -- netstat -an
+
+* Test HTTP latency and request round-trip time from the frontend container to backend:
+  > kubectl exec -it -n tasksphere-app deployment/frontend-deployment -c frontend -- curl -o /dev/null -s -w "Total Time: %{time_total}s\nHTTP Status: %{http_code}\n" http://backend-service:8000/api/telemetry
+
+--------------------------------------------------------------------------------
+PART 1.5: VERIFYING SIMULATED CHAOS METRICS (VIA REST API)
+--------------------------------------------------------------------------------
+
+Since KubeSense simulates faults by overriding metrics at the telemetry API 
+level (to keep the VM stable), you cannot see chaos load changes in OS-level 
+files like /proc/loadavg. Instead, query the KubeSense REST API from inside 
+the cluster:
+
+* To check simulated CPU chaos load (CPU Core consumption):
+  > kubectl exec -i -n tasksphere-app deployment/backend-deployment -c backend -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/metrics/cpu').read().decode())"
+
+* To check simulated STORAGE chaos load (Database volume stats):
+  > kubectl exec -i -n tasksphere-app deployment/backend-deployment -c backend -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/metrics/pvc').read().decode())"
+
+* To check simulated NETWORK chaos load (link latencies and packet drops):
+  > kubectl exec -i -n tasksphere-app deployment/backend-deployment -c backend -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/metrics/network').read().decode())"
+
+* To check the COMPLETE metrics summary (combines CPU, memory, and storage metrics):
+  > kubectl exec -i -n tasksphere-app deployment/backend-deployment -c backend -- python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/metrics/summary').read().decode())"
+
+
+--------------------------------------------------------------------------------
+PART 2: DOCKER DESKTOP APP & CLI VERIFICATION
+--------------------------------------------------------------------------------
+
+Since Minikube runs inside Docker, the containers are running inside a virtualized
+minikube node container. You can inspect these details using Docker CLI and the 
+Docker Desktop graphical interface.
+
+1. DOCKER CLI COMMANDS
+=========================================
+* Get a live, streaming resource usage statistic of the Minikube cluster node:
+  > docker stats minikube
+
+* View overall Docker disk utilization (shows volumes, cache, and image sizing):
+  > docker system df
+
+* List all persistent Docker volumes backing Kubernetes PV/PVCs:
+  > docker volume ls
+
+* Inspect the PostgreSQL volume metadata to find the storage mount path:
+  > docker volume inspect <volume_name>
+  (Find volume name via 'docker volume ls', typically matching 'postgres-pvc')
+
+* Inspect the Minikube node network setup:
+  > docker network ls
+  > docker network inspect bridge
+
+
+2. DOCKER DESKTOP APP (GUI LAYOUT)
+=========================================
+
+* To check CPU and Memory Usage:
+  1. Open the Docker Desktop Dashboard.
+  2. Go to the "Containers" tab in the left-hand navigation.
+  3. Locate the running "minikube" container.
+  4. Click on the container name, then select the "Stats" tab at the top.
+  5. This displays graphical, real-time charts for CPU %, Memory %, Network I/O,
+     and Disk read/write rates.
+
+* To check Storage Volumes:
+  1. Open Docker Desktop.
+  2. Click on the "Volumes" tab in the left-hand sidebar.
+  3. You will see a list of persistent volumes. Look for the volume associated
+     with the database (e.g., matching tasksphere-app or postgres).
+  4. Click on the volume name to view its size on disk, creation time, and 
+     associated container mount path.
+  5. You can click on the "Data" tab to browse files inside the PG DATA folder.
+
+* To check Network Configurations:
+  1. Open Docker Desktop.
+  2. Click on the container name (e.g., "minikube").
+  3. Select the "Inspect" tab.
+  4. Scroll down to the "NetworkSettings" section to view the IP Address, Gateway,
+     bridge network configurations, and forwarded port configurations.
+
+================================================================================
+                                 END OF GUIDE
+================================================================================

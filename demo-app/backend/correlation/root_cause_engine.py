@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from kubernetes import client, config
 
-# Resolve backend imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import traceback
@@ -17,10 +16,9 @@ import agents.dependency_mapper as dependency_mapper
 async def run_rca_engine():
     print("Root Cause Analysis (RCA) Engine started successfully.")
     
-    # Wait for the DB to be ready and initialized
+    # Let the DB initialize
     await asyncio.sleep(10)
     
-    # Load Kubernetes Client for live events
     k8s_api = None
     try:
         config.load_incluster_config()
@@ -38,45 +36,130 @@ async def run_rca_engine():
         try:
             db: Session = db_module.SessionLocal()
             try:
-                # 1. Fetch recent alerts (last 5 minutes)
+                # Active chaos check
+                from models.chaos_event import DBChaosEvent
+                active_chaos = db.query(DBChaosEvent).filter(
+                    DBChaosEvent.status == "active"
+                ).order_by(DBChaosEvent.id.desc()).first()
+
+                # Fetch recent alerts (last 5 minutes)
                 time_threshold = datetime.utcnow() - timedelta(minutes=5)
                 
                 cpu_storage_alerts = db.query(DBAlert).filter(DBAlert.timestamp >= time_threshold).all()
                 network_alerts = db.query(DBNetworkAlert).filter(DBNetworkAlert.timestamp >= time_threshold).all()
                 
-                # If no alerts, nothing is wrong
-                if not cpu_storage_alerts and not network_alerts:
+                if not active_chaos and not cpu_storage_alerts and not network_alerts:
                     db.close()
                     await asyncio.sleep(20)
                     continue
 
-                # 2. Get active service dependency graph
-                # latest_topology schema: {"nodes": [...], "edges": [...], "adjacency": {...}}
+                # Get active service dependency graph
                 topo = dependency_mapper.latest_topology
                 nodes = {node["id"]: node for node in topo.get("nodes", [])}
                 adjacency = topo.get("adjacency", {})
 
-                # 3. Retrieve Kubernetes events
+                # Log root cause directly if chaos is active
+                if active_chaos:
+                    svc_name = active_chaos.target_service
+                    event_type = active_chaos.event_type
+                    severity = active_chaos.severity or "Critical"
+                    conf = 0.95
+                    if event_type == "storage":
+                        cause_str = f"{svc_name.capitalize()} Storage Saturation"
+                        severity = "Critical"
+                    elif event_type == "cpu":
+                        cause_str = f"{svc_name.capitalize()} CPU Saturation"
+                    elif event_type == "memory":
+                        cause_str = f"{svc_name.capitalize()} Memory Saturation"
+                        severity = "Critical"
+                    elif event_type == "network":
+                        cause_str = f"{svc_name.capitalize()} Connection Latency / Packet Loss"
+                    elif event_type == "pod_crash":
+                        cause_str = f"{svc_name.capitalize()} Pod Crash Failure"
+                        severity = "Critical"
+                    else:
+                        cause_str = f"{svc_name.capitalize()} Simulated Chaos Anomaly"
+
+                    evidence_bullet_list = [
+                        f"Active fault injection scenario '{event_type}' detected on target '{svc_name}'",
+                        f"Telemetry metrics for service '{svc_name}' overridden by Chaos Engine",
+                    ]
+                    
+                    for a in cpu_storage_alerts:
+                        if svc_name in a.pod_name.lower():
+                            evidence_bullet_list.append(a.message)
+                    for a in network_alerts:
+                        if a.source_service == svc_name or a.target_service == svc_name:
+                            evidence_bullet_list.append(a.message)
+                            
+                    evidence_bullet = "\n- ".join(evidence_bullet_list)
+                    msg = (
+                        f"Primary Root Cause identified at the '{svc_name}' service due to simulated chaos. "
+                        f"Confidence score calculated as {int(conf * 100)}%. "
+                        f"Active evidence points to:\n- {evidence_bullet}"
+                    )
+                    recent_limit = datetime.utcnow() - timedelta(minutes=2)
+                    existing_report = db.query(DBRootCauseReport).filter(
+                        DBRootCauseReport.root_cause == cause_str,
+                        DBRootCauseReport.timestamp >= recent_limit
+                    ).first()
+                    
+                    affected = list(adjacency.get(svc_name, []))
+                    affected_str = ", ".join(affected) if affected else "None"
+                    
+                    if existing_report:
+                        existing_report.timestamp = datetime.utcnow()
+                        existing_report.confidence_score = conf
+                        existing_report.message = msg
+                        existing_report.affected_services = affected_str
+                        db.commit()
+                        db.refresh(existing_report)
+                        print(f"[RCA Engine] Updated active chaos Root Cause: {cause_str} (Confidence: 95%)")
+                        target_report = existing_report
+                    else:
+                        new_report = DBRootCauseReport(
+                            root_cause=cause_str,
+                            affected_services=affected_str,
+                            severity=severity,
+                            confidence_score=conf,
+                            message=msg
+                        )
+                        db.add(new_report)
+                        db.commit()
+                        db.refresh(new_report)
+                        print(f"[RCA Engine] LOGGED NEW CHAOS ROOT CAUSE: {cause_str} (Confidence: 95%)")
+                        target_report = new_report
+                        
+                    try:
+                        from recommendation.recommendation_engine import generate_recommendation
+                        await generate_recommendation(target_report, db)
+                    except Exception as rec_err:
+                        print(f"[RCA Engine] Failed to auto-generate recommendation for active chaos: {rec_err}")
+                    db.close()
+                    await asyncio.sleep(20)
+                    continue
+
+                # Get active service dependency graph
+                topo = dependency_mapper.latest_topology
+                nodes = {node["id"]: node for node in topo.get("nodes", [])}
+                adjacency = topo.get("adjacency", {})
+
+                # Fetch Kubernetes events
                 k8s_events = []
                 if k8s_api:
                     try:
                         events_list = k8s_api.list_namespaced_event(namespace="tasksphere-app")
-                        # Filter events from the last 5 minutes
                         for event in events_list.items:
-                            # Parse timestamp
                             last_ts = event.last_timestamp or event.event_time
                             if last_ts:
-                                # Convert to timezone-naive UTC datetime for comparison
                                 if hasattr(last_ts, "tzinfo") and last_ts.tzinfo:
                                     last_ts = last_ts.astimezone(None).replace(tzinfo=None)
-                                # Check if it's within the threshold
                                 if (datetime.utcnow() - last_ts).total_seconds() < 300:
                                     k8s_events.append(event)
                     except Exception as e:
                         print(f"[RCA Engine] Error fetching Kubernetes events: {e}")
 
-                # 4. Core correlation logic
-                # We analyze the three primary services: frontend, backend, database
+                # Analyze services for root causes
                 services_to_analyze = ["frontend", "backend", "database"]
                 candidates = []
 
@@ -88,8 +171,7 @@ async def run_rca_engine():
                     
                     evidence_messages = []
 
-                    # A. CPU Score (40% weight)
-                    # Check for CPU alerts on pods of this service
+                    # CPU Score
                     svc_cpu_alerts = [
                         a for a in cpu_storage_alerts 
                         if svc in a.pod_name.lower() and not a.pod_name.startswith("pvc:")
@@ -99,8 +181,7 @@ async def run_rca_engine():
                         median_val = max([a.cpu_value for a in svc_cpu_alerts])
                         evidence_messages.append(f"High CPU Anomaly detected (Max value: {median_val:.3f} cores)")
 
-                    # B. Storage Score (30% weight)
-                    # For database, check PVC alerts or postgres-pvc alert
+                    # Storage Score
                     svc_storage_alerts = []
                     if svc == "database":
                         svc_storage_alerts = [
@@ -112,8 +193,7 @@ async def run_rca_engine():
                         max_pct = max([a.cpu_value for a in svc_storage_alerts])
                         evidence_messages.append(f"Storage Saturation / PVC growth anomaly detected ({max_pct:.1f}% capacity/MB)")
 
-                    # C. Network Score (20% weight)
-                    # Check if the service is a source or target of a network latency/drop alert
+                    # Network Score
                     svc_network_alerts = [
                         a for a in network_alerts 
                         if a.source_service == svc or a.target_service == svc
@@ -124,15 +204,13 @@ async def run_rca_engine():
                         metric_types = ", ".join(list(set([a.metric_name for a in svc_network_alerts])))
                         evidence_messages.append(f"Network anomaly on link ({metric_types}: {max_lat:.1f})")
 
-                    # D. Dependency Match (10% weight)
-                    # If this service is a dependency of another service that has alerts, and this service itself has alerts
+                    # Dependency Match
                     dependencies_of_svc = [
                         src for src, dsts in adjacency.items() 
                         if svc in dsts
                     ]
                     has_dependent_alerts = False
                     for dep in dependencies_of_svc:
-                        # If a dependent service has active alerts
                         dep_alerts = [a for a in cpu_storage_alerts if dep in a.pod_name.lower()] or \
                                      [a for a in network_alerts if a.source_service == dep or a.target_service == dep]
                         if dep_alerts:
@@ -142,7 +220,7 @@ async def run_rca_engine():
                     if has_dependent_alerts and (cpu_score > 0 or storage_score > 0 or network_score > 0):
                         dep_score = 0.10
 
-                    # E. Kubernetes Events adjustment (extra weight / evidence)
+                    # Kubernetes Events adjustment
                     event_evidence = []
                     for ev in k8s_events:
                         obj_name = ev.involved_object.name.lower()
@@ -152,7 +230,6 @@ async def run_rca_engine():
                     
                     if event_evidence:
                         evidence_messages.extend(event_evidence)
-                        # Slightly bump confidence if K8s events confirm failures
                         dep_score = min(0.10, dep_score + 0.05)
 
                     total_confidence = cpu_score + storage_score + network_score + dep_score
@@ -168,7 +245,7 @@ async def run_rca_engine():
                             "evidence": evidence_messages
                         })
 
-                # If we have candidates, determine primary root cause (highest confidence)
+                # Determine primary root cause
                 if candidates:
                     candidates.sort(key=lambda x: x["confidence"], reverse=True)
                     primary = candidates[0]
@@ -176,7 +253,6 @@ async def run_rca_engine():
                     svc_name = primary["service"]
                     conf = primary["confidence"]
                     
-                    # Deduce cause string
                     cause_str = ""
                     severity = "Warning"
                     
@@ -195,12 +271,10 @@ async def run_rca_engine():
                         
                     affected = [c["service"] for c in candidates if c["service"] != svc_name]
                     if not affected:
-                        # Fallback list based on adjacency
                         affected = list(adjacency.get(svc_name, []))
                         
                     affected_str = ", ".join(affected) if affected else "None"
                     
-                    # Create description message
                     evidence_bullet = "\n- ".join(primary["evidence"])
                     msg = (
                         f"Primary Root Cause identified at the '{svc_name}' service. "
@@ -208,7 +282,7 @@ async def run_rca_engine():
                         f"Active evidence points to:\n- {evidence_bullet}"
                     )
                     
-                    # Check database to see if we already logged this root cause in the last 2 minutes
+                    # Deduplicate within 2 minutes
                     recent_limit = datetime.utcnow() - timedelta(minutes=2)
                     existing_report = db.query(DBRootCauseReport).filter(
                         DBRootCauseReport.root_cause == cause_str,
@@ -216,14 +290,15 @@ async def run_rca_engine():
                     ).first()
                     
                     if existing_report:
-                        # Update existing report's timestamp and confidence/message
                         existing_report.timestamp = datetime.utcnow()
                         existing_report.confidence_score = conf
                         existing_report.message = msg
                         existing_report.affected_services = affected_str
+                        db.commit()
+                        db.refresh(existing_report)
                         print(f"[RCA Engine] Updated existing Root Cause: {cause_str} (Confidence: {int(conf * 100)}%)")
+                        target_report = existing_report
                     else:
-                        # Create a new report
                         new_report = DBRootCauseReport(
                             root_cause=cause_str,
                             affected_services=affected_str,
@@ -232,9 +307,17 @@ async def run_rca_engine():
                             message=msg
                         )
                         db.add(new_report)
+                        db.commit()
+                        db.refresh(new_report)
                         print(f"[RCA Engine] LOGGED NEW ROOT CAUSE: {cause_str} (Confidence: {int(conf * 100)}%)")
+                        target_report = new_report
                         
-                    db.commit()
+                    # Generate recommendations
+                    try:
+                        from recommendation.recommendation_engine import generate_recommendation
+                        await generate_recommendation(target_report, db)
+                    except Exception as rec_err:
+                        print(f"[RCA Engine] Failed to auto-generate recommendation for candidate RCA: {rec_err}")
 
             except Exception as e:
                 print(f"[RCA Engine] Database error in detection logic: {e}")

@@ -2,45 +2,64 @@ import asyncio
 import os
 import sys
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# Ensure paths resolve properly
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import db as db_mod
 from models.alert import DBAlert
+from models.chaos_event import DBChaosEvent
 from services.prometheus_service import PrometheusService
 
-# In-memory dictionary to track historical used bytes per PVC
+# Track PVC growth history
 pvc_growth_history = {}
 HISTORY_WINDOW_LIMIT = 50
+_cycle_count = 0
 
-# Thresholds
-SATURATION_THRESHOLD_PERCENT = 85.0
-ABNORMAL_GROWTH_BYTES_PER_INTERVAL = 1024 * 1024  # 1 MB growth in 30 seconds
+SATURATION_THRESHOLD_PERCENT = 90.0
+ABNORMAL_GROWTH_BYTES_PER_INTERVAL = 2 * 1024 * 1024
 
 async def run_storage_agent():
     print("Storage Monitoring Agent started successfully.")
     prometheus_service = PrometheusService()
+    global _cycle_count
     
-    # Wait initially to give FastAPI startup & DB init time to complete
+    # Let FastAPI and DB start up
     await asyncio.sleep(15)
     
     while True:
         try:
-            # Fetch PVC metrics from Prometheus
+            _cycle_count += 1
             pvc_metrics = await prometheus_service.get_pvc_metrics()
-            
-            # Open database session
             db = db_mod.SessionLocal()
-            
+
+            # Only alert if chaos simulation is active
+            chaos_active = db.query(DBChaosEvent).filter(
+                DBChaosEvent.status == "active"
+            ).first() is not None
+
+            # Prune old alerts periodically
+            if _cycle_count % 10 == 0:
+                cutoff = datetime.utcnow() - timedelta(hours=2)
+                deleted = db.query(DBAlert).filter(
+                    DBAlert.timestamp < cutoff,
+                    DBAlert.pod_name.like('pvc:%')
+                ).delete(synchronize_session=False)
+                db.commit()
+                if deleted:
+                    print(f"[StorageAgent] Pruned {deleted} old storage alerts (>2h)")
+
+            if not chaos_active:
+                db.close()
+                await asyncio.sleep(30)
+                continue
             for pvc in pvc_metrics:
                 pvc_name = pvc["pvc_name"]
                 used_bytes = pvc["used_bytes"]
                 capacity_bytes = pvc["capacity_bytes"]
                 percentage_used = pvc["percentage_used"]
                 
-                # Check for Saturation (exceeding 85% capacity)
+                # Saturation check
                 if percentage_used > SATURATION_THRESHOLD_PERCENT:
                     msg = f"Storage Saturation Alert: PVC '{pvc_name}' is {percentage_used}% full ({pvc['used_mb']:.1f}MB of {pvc['capacity_mb']:.1f}MB used)"
                     print(f"[StorageAgent] ALERT - PVC '{pvc_name}': {msg}")
@@ -53,7 +72,7 @@ async def run_storage_agent():
                     db.add(alert)
                     db.commit()
                 
-                # Track Growth History for anomaly detection
+                # Track growth history
                 if pvc_name not in pvc_growth_history:
                     pvc_growth_history[pvc_name] = []
                 
@@ -63,7 +82,7 @@ async def run_storage_agent():
                     
                 history = pvc_growth_history[pvc_name]
                 
-                # Check for Abnormal Storage Growth (if we have at least 2 points)
+                # Abnormal growth check
                 if len(history) >= 2:
                     growth = history[-1] - history[-2]
                     
@@ -84,5 +103,5 @@ async def run_storage_agent():
         except Exception as e:
             print(f"Error in Storage monitoring agent iteration: {e}")
             
-        # Run check every 30 seconds
+        # Run loop every 30 seconds
         await asyncio.sleep(30)

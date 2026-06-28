@@ -26,3 +26,8 @@ async def get_pvc(service: PrometheusService = Depends(get_prometheus_service)):
 @router.get("/summary")
 async def get_summary(service: PrometheusService = Depends(get_prometheus_service)):
     return await service.get_summary_metrics()
+
+@router.get("/network")
+async def get_network(service: PrometheusService = Depends(get_prometheus_service)):
+    return await service.get_network_metrics()
+

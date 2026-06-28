@@ -50,16 +50,20 @@ demo-app/
 
 ## ⚙️ Getting Started
 
-### Prerequisites
+You can run KubeSense in two modes depending on your needs:
+1. **Local Standalone Mode (Zero-Config)**: Runs the frontend and backend directly on your computer. Telemetry and anomalies are fully simulated, and the backend automatically falls back to a local SQLite database (`tasksphere.db`). No PostgreSQL or Kubernetes/Minikube setup is required.
+2. **Kubernetes Cluster Mode (Minikube)**: Runs the application inside a Minikube cluster, querying live Kubernetes telemetry from a Prometheus deployment, and storing data in a PostgreSQL container.
+
+---
+
+### Option 1: Local Standalone Mode (Recommended for Quick Run)
+
+#### Prerequisites
 *   Node.js (v18+)
 *   Python (v3.10+)
-*   PostgreSQL
-*   Kubernetes Cluster with Prometheus deployed (optional, for live telemetry integration)
-
-### Installation & Local Setup
 
 #### 1. Backend Setup
-1. Navigate to the backend folder:
+1. Open a terminal and navigate to the backend folder:
    ```bash
    cd demo-app/backend
    ```
@@ -75,21 +79,70 @@ demo-app/
    ```bash
    pip install -r requirements.txt
    ```
-4. Run the FastAPI dev server:
+4. Run the FastAPI development server:
    ```bash
    uvicorn main:app --reload
    ```
+   *Note: The backend will automatically create a local SQLite database file `tasksphere.db` in the backend directory. You do not need to configure any database settings.*
 
 #### 2. Frontend Setup
-1. Navigate to the frontend folder:
+1. Open a new terminal window and navigate to the frontend folder:
    ```bash
    cd demo-app/frontend
    ```
-2. Install Node dependencies:
+2. Install dependencies:
    ```bash
    npm install
    ```
-3. Run the Vite development server:
+3. Run the development server:
    ```bash
    npm run dev
+   ```
+4. Open your browser and navigate to the URL printed in the console (usually `http://localhost:5173`).
+
+---
+
+### Option 2: Kubernetes Cluster Mode
+
+#### Prerequisites
+*   Minikube
+*   Kubectl
+*   Docker Desktop / Hypervisor
+
+#### Quick Start with PowerShell (Windows)
+We provide a startup script to start Minikube, apply manifests, and establish tunnels automatically:
+1. Run the startup script from the project root:
+   ```powershell
+   .\start.ps1
+   ```
+2. Keep the newly opened tunnel terminal windows running to maintain connection to the cluster services.
+
+#### Manual Startup Steps (Cross-Platform)
+1. Start Minikube:
+   ```bash
+   minikube start
+   ```
+2. Build and load the Docker images into Minikube's Docker daemon registry:
+   ```bash
+   # Point shell to minikube docker daemon
+   eval $(minikube docker-env) # On macOS/Linux
+   # or: minikube docker-env | Invoke-Expression # On Windows
+
+   # Build Backend
+   docker build -t tasksphere-backend:latest demo-app/backend/
+
+   # Build Frontend
+   docker build -t tasksphere-frontend:latest demo-app/frontend/
+   ```
+3. Apply the Kubernetes manifests:
+   ```bash
+   kubectl apply -f demo-app/k8s/namespace.yaml
+   kubectl apply -f demo-app/k8s/rbac.yaml
+   kubectl apply -f demo-app/k8s/prometheus.yaml
+   kubectl apply -f demo-app/k8s/deployment.yaml
+   kubectl apply -f demo-app/k8s/service.yaml
+   ```
+4. Expose the services using Minikube tunnel:
+   ```bash
+   minikube service frontend-service -n tasksphere-app
    ```
